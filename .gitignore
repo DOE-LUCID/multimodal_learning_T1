@@ -1,0 +1,31 @@
+# environmental vars
+.env
+
+# logs
+/wandb
+
+# temp files 
+/tmp
+/logs
+/tags
+/caches
+**/*~
+
+._*
+**/__pycache__
+
+# checkpoints
+/checkpoints
+
+# created data objs
+mapping_data.h5
+
+# results
+/results
+/IG_6sep
+
+# run scripts
+/run_scripts
+
+
+

@@ -1,0 +1,55 @@
+# Base configuration
+
+data:
+  input_path: "/lus/eagle/clone/g2/projects/GeomicVar/tarak/multimodal_learning_T1/preprocessing/"
+  input_wsi_path: "/lus/eagle/clone/g2/projects/GeomicVar/tarak/multimodal_learning_T1/preprocessing/TCGA_WSI/LUAD_all/svs_files/FFPE_tiles_single_sample_per_patient_13july/tiles/256px_9.9x/combined/"
+  h5_file: "joint_fusion/mapping_data.h5"
+  input_mapping_data_path: "/lus/eagle/clone/g2/projects/GeomicVar/jozhw/multimodal_learning_T1/joint_fusion/"
+  only_create_new_data_mapping: false
+  create_new_data_mapping: false
+  create_new_data_mapping_h5: false
+  
+model:
+  embedding_dim_wsi: 384
+  embedding_dim_omic: 256
+  mlp_layers: 4
+  dropout: 0.2
+  fusion_type: "joint"
+  joint_embedding: "weighted_avg"
+  input_mode: "wsi_omic"
+  use_pretrained_omic: false
+  omic_checkpoint_path: "checkpoints/checkpoint_2024-09-04-07-56-47/checkpoint_epoch_1500.pth" 
+  
+training:
+  batch_size: 80
+  val_batch_size: 70
+  lr: 0.0001
+  num_epochs: 50
+  n_folds: 5
+  use_mixed_precision: true
+  plot_survival_distributions: true
+
+testing:
+  test_batch_size: 1
+
+gpu:
+  gpu_ids: "0,1,2,3"
+  use_multi_gpu: true
+
+logging:
+  log_level: "INFO"
+  checkpoint_dir: null  # Will be auto-generated if null
+  profile: false
+  
+scheduler:
+  type: "cosine_warmer"  # cosine_warmer, exponential, step_lr
+  cosine_warmer:
+    T_0: 10
+    T_mult: 2
+    eta_min: 0.000001
+    decay_factor: 0.5
+  exponential: # although other types not used for reference
+    gamma: 0.95
+  step_lr:
+    step_size: 10
+    gamma: 0.95
