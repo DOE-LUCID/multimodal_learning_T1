@@ -14,6 +14,7 @@ import cv2
 import h5py
 import ast
 import logging
+import hashlib
 from collections import OrderedDict
 from threading import Lock
 
@@ -111,10 +112,18 @@ class CustomDataset(Dataset):
 
 
 class HDF5Dataset(Dataset):
-    def __init__(self, h5_file, split, mode="wsi", train_val_test="train"):
+    def __init__(
+        self,
+        h5_file,
+        split,
+        mode="wsi",
+        train_val_test="train",
+        num_tiles_per_slide=400,
+    ):
         self.train_val_test = train_val_test
         self.split = split
         self.mode = mode
+        self.num_tiles_per_slide = num_tiles_per_slide
 
         self.h5_file_path = h5_file
         self.h5_file = h5py.File(h5_file, "r")
@@ -171,7 +180,9 @@ class HDF5Dataset(Dataset):
         )  # 4 bytes per float32
 
         # Calculate max cached patients
-        images_per_patient = 200  # NEED_ADD: Set right now but adjust based on params
+        images_per_patient = (
+            self.num_tiles_per_slide
+        )  # NEED_ADD: Set right now but adjust based on params
 
         memory_per_patient_mb = self.estimated_image_memory_mb * images_per_patient
         self.max_cached_patients = max(
@@ -246,7 +257,8 @@ class HDF5Dataset(Dataset):
 
         logger.info("Pre-computing RNA-Seq data transformations...")
 
-        cache_file = self.cache_dir / "precomputed_omic.pkl"
+        ids_hash = hashlib.md5("".join(sorted(self.patient_ids)).encode()).hexdigest()
+        cache_file = self.cache_dir / f"precomputed_omic_{ids_hash}.pkl"
 
         if cache_file.exists():
             logger.info("Loading precomputed omic data from cache...")
@@ -258,11 +270,41 @@ class HDF5Dataset(Dataset):
                     logger.info(f"Processing omic data: {i}/{len(self.patient_ids)}")
 
                 patient_data = self.dataset[patient_id]
-                rnaseq_data = patient_data["rnaseq_data"][()]
+                rnaseq_data = patient_data["rnaseq_data"][()].astype(np.float32)
+
+                if np.isnan(rnaseq_data).any():
+                    logger.error(
+                        f"Patient {patient_id} has NaN values in the raw RNA-seq data"
+                    )
+                    rnaseq_data = np.nan_to_num(rnaseq_data, nan=0.0)
+
+                if np.isinf(rnaseq_data).any():
+                    logger.error(
+                        f"Patient {patient_id} has Inf values in the raw RNA-seq data"
+                    )
+                    rnaseq_data = np.nan_to_num(
+                        rnaseq_data, nan=0.0, posinf=0.0, neginf=0.0
+                    )
 
                 # Apply log1p transform and convert to tensor
-                rnaseq_transformed = np.log1p(rnaseq_data).astype(np.float32)
-                self.precomputed_omic[patient_id] = torch.from_numpy(rnaseq_transformed)
+                # Commented out since data is already scaled, but it has neg values so wont work with log1p
+                # rnaseq_transformed = np.log1p(rnaseq_data).astype(np.float32)
+                rnaseq_transformed = rnaseq_data
+
+                if (
+                    np.isnan(rnaseq_transformed).any()
+                    or np.isinf(rnaseq_transformed).any()
+                ):
+                    logger.error(
+                        f"Patient {patient_id} has NaN/Inf after log1p transform"
+                    )
+                    rnaseq_transformed = np.nan_to_num(
+                        rnaseq_data, nan=0.0, posinf=0.0, neginf=0.0
+                    )
+
+                self.precomputed_omic[patient_id] = torch.from_numpy(
+                    rnaseq_transformed
+                ).float()
 
             # Save to cache
             with open(cache_file, "wb") as f:
@@ -408,7 +450,7 @@ class HDF5Dataset(Dataset):
         except Exception as e:
             logger.error(f"Error loading images for patient {patient_id}: {e}")
             # Return dummy data to prevent crashes
-            images = torch.zeros((200, 3, 256, 256))
+            images = torch.zeros((self.num_tiles_per_slide, 3, 256, 256))
 
         return images
 
@@ -453,9 +495,15 @@ class HDF5Dataset(Dataset):
 
         # Load images with caching (optimized)
         images = self._load_and_process_images(patient_id, patient_data)
+        print(
+            f"DEBUG - Patient {patient_id}: images.shape = {images.shape}"
+        )  # Should be [N, 3, 256, 256]
 
         # Convert to list for compatibility with existing code
-        images_list = [img for img in images]
+        images_list = list(torch.unbind(images, dim=0))
+        print(
+            f"DEBUG - images_list length: {len(images_list)}, first shape: {images_list[0].shape}"
+        )
 
         step3_time = time.time()
 

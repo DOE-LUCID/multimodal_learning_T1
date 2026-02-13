@@ -4,4 +4,4 @@
 CONFIG="joint_fusion/config/config_3f_100ep.yaml"
 
 # make sure to call from root dir
-python -m joint_fusion.training.trainer --config=$CONFIG
+python -m joint_fusion.testing.tester --config=$CONFIG

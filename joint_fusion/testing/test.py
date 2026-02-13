@@ -1,13 +1,129 @@
-import np
+import os
+import numpy as np
 import torch
+import matplotlib.pyplot as plt
+
+from pathlib import Path
+from sksurv.metrics import concordance_index_censored
+from lifelines import KaplanMeierFitter
+from lifelines.statistics import logrank_test
+
+
+def denormalize_image(image, mean, std):
+    mean = np.array(mean)
+    std = np.array(std)
+    image = (image * std) + mean
+    image = np.clip(image, 0, 1)
+    return image
+
+
+def calc_integrated_gradients(
+    model, config, tcga_id, x_omic, x_wsi, baseline=None, steps=10
+):
+    # baseline = None
+    # baseline.shape
+    # torch.Size([1, 19962])
+    # set_trace()
+    if baseline is None:
+        print("** using trivial zero baseline for IG **")
+        baseline = torch.zeros_like(x_omic).to(x_omic.device)
+    else:
+        print(
+            "** Using mean gene expression values over training samples as the baseline for IG **"
+        )
+        baseline = torch.from_numpy(baseline).to(x_omic.device)
+        baseline = baseline.float()
+        baseline = baseline * torch.ones_like(x_omic).to(x_omic.device)
+    # set_trace()
+    print(f"CALCULATING INTEGRATED GRADIENTS OVER {steps} steps")
+    scaled_inputs = [
+        baseline + (float(i) / steps) * (x_omic - baseline) for i in range(steps + 1)
+    ]
+    gradients = []
+    steps_index = 0
+    for scaled_input in scaled_inputs:
+        print("steps_index: ", steps_index)
+        scaled_input = scaled_input.clone().detach().requires_grad_(True)
+        with torch.enable_grad():
+            pred, _, _ = model(
+                config,
+                tcga_id,
+                x_wsi=x_wsi,  # list of tensors (one for each tile)
+                x_omic=scaled_input,
+            )
+            print("prediction: ", pred)
+            output = pred.sum()
+            output.backward()
+        gradients.append(scaled_input.grad.detach().cpu().numpy())
+        steps_index += 1
+    # set_trace()
+    avg_gradients = np.mean(gradients[:-1], axis=0)
+    integrated_grads = (
+        x_omic.detach().cpu().numpy() - baseline.detach().cpu().numpy()
+    ) * avg_gradients
+
+    return integrated_grads
+
+
+def plot_saliency_maps(
+    saliencies,
+    x_wsi,
+    tcga_id,
+    patch_id,
+    output_dir,
+    threshold=0.8,
+):
+    # get the first image and saliency map
+    saliency = saliencies[0].squeeze().cpu().numpy()
+    # image = x_wsi[0].squeeze().permute(1, 2, 0).cpu().numpy()  # convert image to HxWxC and move to cpu
+    image = x_wsi[0].squeeze().permute(1, 2, 0).detach().cpu().numpy()
+    # denormalize the image based on normalization factors used during transformations of the test images
+    mean = [0.70322989, 0.53606487, 0.66096631]
+    std = [0.21716536, 0.26081574, 0.20723464]
+    image = denormalize_image(image, mean, std)
+
+    # normalize the saliency map to [0, 1]
+    saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min())
+
+    plt.figure(figsize=(18, 6))
+
+    plt.subplot(1, 3, 1)
+    plt.imshow(image)
+    plt.title("original patch")
+
+    # overlay saliency map on the image
+    ax = plt.subplot(1, 3, 2)
+    img = ax.imshow(image)
+    # saliency_overlay = ax.imshow(saliency, cmap="hot", alpha=0.5)
+    saliency_overlay = ax.imshow(np.clip(saliency, threshold, 1), cmap="hot", alpha=0.5)
+    cbar = plt.colorbar(saliency_overlay, ax=ax)
+    cbar.set_label("saliency value", rotation=270, labelpad=15)
+
+    plt.title("saliency map overlay")
+
+    # plot the saliency map alone
+    plt.subplot(1, 3, 3)
+    plt.imshow(saliency, cmap="hot")
+    plt.colorbar(label="saliency value")
+    plt.title("saliency map only")
+
+    save_path = os.path.join(
+        output_dir, f"saliency_overlay_{tcga_id[0]}_{patch_id}.png"
+    )
+    plt.savefig(save_path)
+    print(f"saved saliency overlay to {save_path}")
+
+    plt.close()
 
 
 def interpret_omic():
 
+    # not used since the code is already simple enough
+
     pass
 
 
-def interpret_wsi(x_wsi):
+def interpret_wsi(x_wsi, tcga_id, output_dir_saliency):
 
     patch_idx = 0
     max_patches = 10
@@ -30,7 +146,7 @@ def interpret_wsi(x_wsi):
         patch_idx += 1
 
 
-def test_and_interpret(opt, model, test_loader, device, baseline=None):
+def test_and_interpret(config, model, test_loader, device, baseline=None):
     model.eval()
     test_loss_epoch = 0.0
     all_tcga_ids = []
@@ -41,7 +157,7 @@ def test_and_interpret(opt, model, test_loader, device, baseline=None):
     # base directory
     import os
 
-    base_path = Path(opt.output_base_dir)
+    base_path = Path(config.testing.output_base_dir)
     # create the directory to save saliency maps if it doesn't exist
     output_dir_saliency = str(base_path / "saliency_maps_6sep")
     os.makedirs(output_dir_saliency, exist_ok=True)
@@ -86,19 +202,19 @@ def test_and_interpret(opt, model, test_loader, device, baseline=None):
             # print("Days to event: ", days_to_event)
             # print("event occurred: ", event_occurred)
 
-            if opt.calc_saliency_maps is False:
+            if config.testing.calc_saliency_maps is False:
                 outputs, wsi_embedding, omic_embedding = model(
-                    opt,
+                    config,
                     tcga_id,
                     x_wsi=x_wsi,  # list of tensors (one for each tile)
                     x_omic=x_omic,
                 )
 
-            if opt.calc_saliency_maps is True:
+            else:
                 # perform the forward pass without torch.no_grad() to allow gradient computation
                 with torch.enable_grad():
                     outputs, wsi_embedding, omic_embedding = model(
-                        opt,
+                        config,
                         tcga_id,
                         x_wsi=x_wsi,  # list of tensors (one for each tile)
                         x_omic=x_omic,
@@ -125,49 +241,21 @@ def test_and_interpret(opt, model, test_loader, device, baseline=None):
                     outputs.backward()  # if outputs is not scalar, reduce it to scalar
 
                     # saliencies = []  # list of saliency maps corresponding to each image in `x_wsi`
-                    patch_idx = 0
-                    max_patches = 10
-                    print("OBTAINING SALIENCY MAPS")
-                    for image in x_wsi:
-                        print(
-                            f"Generating saliency map for patch index {patch_idx} out of {max_patches}"
-                        )
-                        if patch_idx >= max_patches:  # limit to 10 patches
-                            break
-                        if image.grad is not None:
-                            saliency, _ = torch.max(image.grad.data.abs(), dim=1)
-                            # saliencies.append(saliency)
-                            plot_saliency_maps(
-                                saliency, image, tcga_id, patch_idx, output_dir_saliency
-                            )
-                            del saliency
-                        else:
-                            raise RuntimeError(
-                                "Gradients have not been computed for one of the images in x_wsi."
-                            )
-                        patch_idx += 1
-                    # plot_saliency_maps(saliencies, x_wsi, tcga_id)
 
-            if opt.calc_IG is True:
+                    interpret_wsi(x_wsi, tcga_id, output_dir_saliency)
+
+            if config.testing.calc_IG is True:
                 integrated_grads = calc_integrated_gradients(
-                    model, opt, tcga_id, x_omic, x_wsi, baseline=baseline, steps=10
+                    model, config, tcga_id, x_omic, x_wsi, baseline=baseline, steps=10
                 )
                 save_path = os.path.join(
                     output_dir_IG, f"integrated_grads_{tcga_id[0]}.npy"
                 )
                 np.save(save_path, integrated_grads)
                 print(f"Saved integrated gradients for {tcga_id[0]} to {save_path}")
-            # set_trace()
 
-            # loss = cox_loss(outputs.squeeze(),
-            #                 # predictions are not survival outcomes, rather log-risk scores beta*X
-            #                 days_to_event,
-            #                 event_occurred)  # Cox partial likelihood loss for survival outcome prediction
-
-            # print("\n loss (test): ", loss.data.item())
-            # test_loss_epoch += loss.data.item() * len(tcga_id)
             all_predictions.append(outputs.squeeze().detach().cpu().numpy())
-            # all_predictions.append(outputs.squeeze())
+
             del outputs
             torch.cuda.empty_cache()
             all_tcga_ids.append(tcga_id)
@@ -232,7 +320,7 @@ def test_and_interpret(opt, model, test_loader, device, baseline=None):
     plt.xlabel("Time (days)")
     plt.ylabel("Survival probability")
     plt.legend()
-    output_path = str(Path(opt.output_base_dir) / "km_plot_joint_fusion.png")
+    output_path = str(Path(config.testing.output_base_dir) / "km_plot_joint_fusion.png")
     plt.savefig(output_path, format="png", dpi=300)
 
     return None

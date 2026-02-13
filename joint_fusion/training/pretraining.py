@@ -1,5 +1,4 @@
 import torch
-
 import numpy as np
 import typing as tp
 
@@ -14,7 +13,15 @@ class StratifiedBatchSampler:
     Combines time stratification with risk-set preservation
     """
 
-    def __init__(self, times, events, batch_size, min_risk_coverage=0.8, shuffle=True):
+    def __init__(
+        self,
+        times,
+        events,
+        batch_size,
+        min_risk_coverage=0.8,
+        shuffle=True,
+        random_state: int = 40,
+    ):
         self.times = np.array(times)
         self.events = np.array(events)
         self.batch_size = batch_size
@@ -203,7 +210,7 @@ def _create_stratification_labels(
             discretizer.fit_transform(times.reshape(-1, 1)).flatten().astype(int)
         )
 
-        print(f"Time bin distribution:")
+        print("Time bin distribution:")
         unique_bins, bin_counts = np.unique(time_bins, return_counts=True)
         for bin_idx, count in zip(unique_bins, bin_counts):
             print(f"  Time bin {bin_idx}: {count} samples")
@@ -229,7 +236,7 @@ def _create_stratification_labels(
     # This creates up to 2 * n_time_bins unique labels
     strat_labels = time_bins * 2 + events.astype(int)
 
-    print(f"Created stratification labels:")
+    print("Created stratification labels:")
     print(f"  - {len(np.unique(strat_labels))} unique stratification groups")
     print(f"  - Range: {strat_labels.min()} to {strat_labels.max()}")
 
@@ -241,7 +248,7 @@ def create_stratified_survival_folds(
     events: np.ndarray,
     n_splits: int = 5,
     n_time_bins: int = 5,
-    random_state: int = 42,
+    random_state: int = 40,
     min_samples_per_group: int = 2,
     strategy: str = "quantile",
 ) -> tp.List[tp.Tuple[np.ndarray, np.ndarray]]:
@@ -422,7 +429,7 @@ def extract_survival_data(dataset) -> tp.Tuple[np.ndarray, np.ndarray]:
     return times_array, events_array
 
 
-def create_data_loaders(config, h5_file):
+def create_data_loaders(config, h5_file, random_state=40):
     full_dataset = HDF5Dataset(
         h5_file,
         split="train",
@@ -438,6 +445,7 @@ def create_data_loaders(config, h5_file):
         batch_size=config.training.batch_size,
         min_risk_coverage=0.8,
         shuffle=True,
+        random_state=random_state,
     )
 
     train_loader = torch.utils.data.DataLoader(

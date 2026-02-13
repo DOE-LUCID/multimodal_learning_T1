@@ -22,27 +22,27 @@ model:
   omic_checkpoint_path: "checkpoints/checkpoint_2024-09-04-07-56-47/checkpoint_epoch_1500.pth" 
   
 training:
-  batch_size: 80
-  val_batch_size: 70
+  batch_size: 50
+  val_batch_size: 50
   lr: 0.0001
-  num_epochs: 50
-  n_folds: 5
+  num_epochs: 100
+  n_folds: 3
   use_mixed_precision: true
   plot_survival_distributions: true
   contrast_loss_weight: 0.0
   sim_loss_weight: 1.0
   random_state: 40
 
-testing:
-  output_base_dir: ""
+testing: # add this after training.
+  output_base_dir: "checkpoints/checkpoint_2026-01-08-15-39-55/test_results"
   test_batch_size: 1
-  model_path: ""
-  calc_saliency_maps: false
+  model_path: "checkpoints/checkpoint_2026-01-08-15-39-55/checkpoint_fold_0_epoch_14.pth"
+  calc_saliency_maps: true
   calc_IG: false
 
 gpu:
   gpu_ids: "0,1,2,3"
-  use_multi_gpu: true
+  use_multi_gpu: true # hard coded false with override for testing
 
 logging:
   log_level: "INFO"

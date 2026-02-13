@@ -15,7 +15,7 @@ class OmicNetwork(nn.Module):  # MLP for WSI tile-level embedding generation
         vae_checkpoint_path="checkpoint/checkpoint_2024-09-04-07-56-47/checkpoint_epoch_1500.pth",
     ):
         super(OmicNetwork, self).__init__()
-        input_dim = 19962
+        input_dim = 9222
         self.embedding_dim = embedding_dim
         self.use_pretrained_vae = use_pretrained_vae
 

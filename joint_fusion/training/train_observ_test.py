@@ -1,6 +1,6 @@
 from joint_fusion.models.loss_functions import JointLoss
 from joint_fusion.models.multimodal_network import MultimodalNetwork
-from joint_fusion.utils.utils import mixed_collate
+from joint_fusion.utils.utils import mixed_collate, seed_worker, print_gpu_memory_usage
 from joint_fusion.testing.analysis import evaluate_test_set
 from .learning_scheduler import CosineAnnealingWarmRestartsDecay
 from .pretraining import (
@@ -8,7 +8,6 @@ from .pretraining import (
     create_stratified_survival_folds,
     extract_survival_data,
 )
-from .train import print_gpu_memory_usage
 from .visualizations import plot_survival_distributions
 
 import gc
@@ -104,7 +103,7 @@ def train_observ_test(config, h5_file, device):
         # Fallback to regular k-fold if stratified fails
         from sklearn.model_selection import KFold
 
-        kf = KFold(n_splits=config.training.n_folds, shuffle=True, random_state=6)
+        kf = KFold(n_splits=config.training.n_folds, shuffle=True, random_state=40)
         folds = list(kf.split(np.arange(len(dataset))))
         print("Falling back to regular K-Fold CV")
 
@@ -166,6 +165,7 @@ def train_observ_test(config, h5_file, device):
             pin_memory=True,
             shuffle=True,
             drop_last=True,
+            worker_init_fn=seed_worker,
         )
         val_loader_fold = DataLoader(
             val_subset,
@@ -174,6 +174,7 @@ def train_observ_test(config, h5_file, device):
             shuffle=False,
             num_workers=4,
             pin_memory=True,
+            worker_init_fn=seed_worker,
         )
 
         # Compute number of batches per epoch
@@ -227,7 +228,10 @@ def train_observ_test(config, h5_file, device):
                 optimizer, T_0=10, T_mult=2, eta_min=1e-6
             )
 
-        joint_loss = JointLoss()
+        joint_loss = JointLoss(
+            sim_weight=config.training.sim_loss_weight,
+            contrast_weight=config.training.contrast_loss_weight,
+        )
 
         # Initialize and fit the scaler for this fold
         print(f"Fitting scaler for fold {fold_idx + 1}...")
@@ -235,7 +239,19 @@ def train_observ_test(config, h5_file, device):
         for batch_idx, (tcga_id, _, _, _, x_omic) in enumerate(train_loader_fold):
             if batch_idx % 10 == 0:  # Print progress every 10 batches
                 print(f"  Fitting batch {batch_idx + 1}/{len(train_loader_fold)}")
+
             x_omic_np = x_omic.cpu().numpy()
+            nan_mask = np.isnan(x_omic_np)
+            inf_mask = np.isinf(x_omic_np)
+            logging.info(
+                "NaN count: %d | Inf count: %d", nan_mask.sum(), inf_mask.sum()
+            )
+
+            logging.info(
+                "%d zero-variance columns in this batch",
+                (x_omic_np.std(axis=0) == 0).sum(),
+            )
+
             scaler.partial_fit(x_omic_np)
 
         # Save the scaler for the current fold
@@ -300,9 +316,11 @@ def train_observ_test(config, h5_file, device):
                             x_omic=x_omic,  # Now properly scaled
                         )
 
+                        predictions = predictions.view(-1)
+
                         # print(f"Model predictions shape: {predictions.shape}")
                         loss = joint_loss(
-                            predictions.squeeze(),
+                            predictions,
                             days_to_event,
                             event_occurred,
                             wsi_embedding,
@@ -315,6 +333,12 @@ def train_observ_test(config, h5_file, device):
                     amp_scaler.scale(loss).backward()
                     amp_scaler.step(optimizer)
                     amp_scaler.update()
+
+                    del predictions, wsi_embedding, omic_embedding, loss, x_wsi, x_omic
+
+                    if batch_idx % 5 == 0:
+                        torch.cuda.empty_cache()
+
                 else:
                     print(" Not using mixed precision")
                     # model for survival outcome (uses Cox PH partial log likelihood as the loss function)
@@ -328,10 +352,12 @@ def train_observ_test(config, h5_file, device):
                         x_wsi=x_wsi,  # list of tensors (one for each tile)
                         x_omic=x_omic,
                     )
+
+                    predictions = predictions.view(-1)
                     # print(f"predictions: {predictions} from train_test.py")
                     step1_time = time.time()
                     loss = joint_loss(
-                        predictions.squeeze(),
+                        predictions,
                         # predictions are not survival outcomes, rather log-risk scores beta*X
                         days_to_event,
                         event_occurred,
@@ -348,6 +374,7 @@ def train_observ_test(config, h5_file, device):
                         retain_graph=True if epoch == 0 and batch_idx == 0 else False
                     )  # tensors retained to allow backpropagation for torchhviz (for visualizing the graph)
                     optimizer.step()
+
                     torch.cuda.empty_cache()
 
                     step3_time = time.time()
@@ -386,7 +413,7 @@ def train_observ_test(config, h5_file, device):
                         },
                         checkpoint_path,
                     )
-                    print(
+                    logging.info(
                         f"Checkpoint saved at epoch {epoch}, fold {fold_idx}, to {checkpoint_path}"
                     )
 
@@ -431,30 +458,44 @@ def train_observ_test(config, h5_file, device):
                         event_occurred = event_occurred.to(device)
                         print("Days to event: ", days_to_event)
                         print("event occurred: ", event_occurred)
-                        outputs, wsi_embedding, omic_embedding = model(
-                            config,
-                            tcga_id,
-                            x_wsi=x_wsi,  # list of tensors (one for each tile)
-                            x_omic=x_omic,
-                        )
+                        batch_size = len(tcga_id)
 
+                        if batch_size < torch.cuda.device_count() and isinstance(
+                            model, nn.DataParallel
+                        ):
+                            outputs, wsi_embedding, omic_embedding = model.module(
+                                config, tcga_id, x_wsi=x_wsi, x_omic=x_omic
+                            )
+                        else:
+                            outputs, wsi_embedding, omic_embedding = model(
+                                config,
+                                tcga_id,
+                                x_wsi=x_wsi,  # list of tensors (one for each tile)
+                                x_omic=x_omic,
+                            )
+
+                        outputs = outputs.view(-1)
                         loss = joint_loss(
-                            outputs.squeeze(),
+                            outputs,
                             # predictions are not survival outcomes, rather log-risk scores beta*X
                             days_to_event,
                             event_occurred,
                             wsi_embedding,
                             omic_embedding,
                         )  # Cox partial likelihood loss for survival outcome prediction
-                        print("\n loss (validation): ", loss.data.item())
+                        logging.info(
+                            f"\n loss (validation): {loss.data.item()}",
+                        )
                         val_loss_epoch += loss.data.item() * len(tcga_id)
-                        val_predictions.append(outputs.squeeze())
+                        val_predictions.append(outputs)
                         val_times.append(days_to_event)
                         val_events.append(event_occurred)
 
                         val_wsi_emb.append(wsi_embedding)
                         val_omic_emb.append(omic_embedding)
                         val_tcga_id_list.extend(tcga_id)
+
+                    torch.cuda.empty_cache()
 
                     val_loss = val_loss_epoch / len(val_loader_fold.dataset)
 
@@ -512,6 +553,9 @@ def train_observ_test(config, h5_file, device):
                 test_ci, test_event_rate, test_statistic, p_value = evaluate_test_set(
                     model, test_loader, device, config
                 )
+
+                torch.cuda.empty_cache()
+                gc.collect()
 
                 mode = (
                     model.module.mode

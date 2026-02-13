@@ -5,6 +5,9 @@ import pandas as pd
 import torch
 import h5py
 import numpy as np
+import random
+import ast
+import time
 
 import os
 import argparse
@@ -35,16 +38,114 @@ def args():
     return parser.parse_args()
 
 
+def set_global_seed(seed: int, deterministic: bool = True):
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def get_device(gpu_ids: str):
+    if gpu_ids and gpu_ids != "-1":
+        gpu_list = [int(x) for x in gpu_ids.split(",")]
+        logging.info(f"Using GPUs: {gpu_list}")
+        return torch.device(f"cuda:{gpu_list[0]}")
+    return torch.device("cpu")
+
+
+def sample_tiles_per_slide(mapping_df, n_tiles: int, seed: int):
+    rng = random.Random(seed)
+
+    def _sample(tiles):
+        if len(tiles) < n_tiles:
+            return None
+        return rng.sample(tiles, n_tiles)
+
+    mapping_df = mapping_df.copy()
+    mapping_df["tiles"] = mapping_df["tiles"].apply(_sample)
+    mapping_df = mapping_df.dropna(subset=["tiles"])
+
+    return mapping_df
+
+
+def create_mapping_df(
+    input_json: str,
+    n_tiles: int,
+    seed: int,
+    excluded_ids: list[str],
+):
+
+    mapping_df = pd.read_json(input_json, orient="index")
+    logging.info(f"Loaded mapping: {mapping_df.shape[0]} samples")
+
+    if isinstance(mapping_df["rnaseq_data"].iloc[0], str):
+        logging.info("Parsing rnaseq_data from string format...")
+        mapping_df["rnaseq_data"] = mapping_df["rnaseq_data"].apply(ast.literal_eval)
+
+    ids_with_wsi = mapping_df[mapping_df["tiles"].map(len) > 0].index.tolist()
+
+    rnaseq_df = pd.DataFrame(
+        mapping_df["rnaseq_data"].to_list(), index=mapping_df.index
+    ).transpose()
+
+    logging.warning("Are there nans in rnaseq_df: %s", rnaseq_df.isna().any().any())
+
+    mapping_df = mapping_df.loc[ids_with_wsi]
+
+    logging.info(
+        "Total number of samples where both rnaseq and wsi data are available: %s",
+        mapping_df.shape[0],
+    )
+
+    # sample tiles
+    mapping_df = sample_tiles_per_slide(mapping_df, n_tiles, seed)
+
+    # survival time
+    mapping_df["time"] = mapping_df["days_to_death"].fillna(
+        mapping_df["days_to_last_followup"]
+    )
+
+    mapping_df = mapping_df.dropna(subset=["time", "event_occurred"])
+    mapping_df = mapping_df[~mapping_df.index.isin(excluded_ids)]
+
+    logging.info(f"Final mapping size: {mapping_df.shape[0]}")
+    return mapping_df
+
+
+def split_mapping(mapping_df, seed: int):
+    train_df, temp_df = train_test_split(mapping_df, test_size=0.3, random_state=seed)
+    val_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=seed)
+    return train_df, val_df, test_df
+
+
 def create_h5_file(file_name, train_df, val_df, test_df, image_dir):
-    with h5py.File(file_name, "w") as hdf:
+    logger = logging.getLogger("h5_creation")
+
+    start_time = time.time()
+
+    temp_file = file_name + ".tmp"
+
+    logger.info(f"Creating HDF5 file (temp): {temp_file}")
+
+    with h5py.File(temp_file, "w") as hdf:
         for df, split in zip([train_df, val_df, test_df], ["train", "val", "test"]):
+
+            logger.info(f"Creating split group: {split} ({len(df)} patients)")
             split_group = hdf.create_group(split)
+
             total_rows = len(df)
             count_row = 0
             for idx, row in df.iterrows():
                 # set_trace()
                 count_row += 1
-                print(f"Processing {split} data: {count_row}/{total_rows} rows")
+
+                logger.info(f"Processing {split} data: {count_row}/{total_rows} rows")
+
                 patient_group = split_group.create_group(idx)
                 patient_group.create_dataset("days_to_death", data=row["days_to_death"])
                 patient_group.create_dataset(
@@ -55,18 +156,35 @@ def create_h5_file(file_name, train_df, val_df, test_df, image_dir):
                     "event_occurred", data=1 if row["event_occurred"] == "Dead" else 0
                 )
 
-                rnaseq_data = np.array(list(row["rnaseq_data"].values()))
+                rnaseq = row["rnaseq_data"]
+                rnaseq_data = np.array(list(rnaseq.values()))
+
                 patient_group.create_dataset("rnaseq_data", data=rnaseq_data)
 
                 # store image tiles
                 images_group = patient_group.create_group("images")
                 for i, tile in enumerate(row["tiles"]):
                     image_path = os.path.join(image_dir, tile)
-                    image = Image.open(image_path)
-                    img_arr = np.array(image)
-                    images_group.create_dataset(
-                        f"image_{i}", data=img_arr, compression="gzip"
-                    )
+                    with Image.open(image_path) as image:
+                        img_arr = np.array(image)
+                        images_group.create_dataset(
+                            f"image_{i}", data=img_arr, compression="gzip"
+                        )
+
+            logger.info(f"Finished split: {split}")
+
+        hdf.flush()
+        logger.info("Flushed HDF5 file to disk")
+
+    logger.info("Validating temporary HDF5 file")
+
+    with h5py.File(temp_file, "r") as f:
+        for split in ["train", "val", "test"]:
+            logger.info(f" {split}: {len(f[split])} patients")
+
+    os.replace(temp_file, file_name)
+    elapsed = time.time() - start_time
+    logger.info(f"HDF5 creation complete: {file_name} ({elapsed:.1f})s")
 
 
 def main():
@@ -74,6 +192,11 @@ def main():
     opt = args()
 
     config = ConfigManager.load_config(opt.config)
+
+    # make model deterministic for reproducibility
+    seed = config.training.random_state
+
+    set_global_seed(seed, deterministic=True)
 
     os.makedirs(config.logging.checkpoint_dir, exist_ok=True)
     ConfigManager.save_config(config, config.logging.checkpoint_dir)
@@ -85,87 +208,52 @@ def main():
         log_level=config.logging.log_level,
     )
 
+    h5_logger = logging.getLogger("h5_creation")
+    h5_logger.setLevel(logging.INFO)
+
     logger.info("Starting training")
     logger.info(f"Checkpoint dir: {config.logging.checkpoint_dir}")
 
-    if config.gpu.gpu_ids and config.gpu.gpu_ids != "-1":
-        gpu_list = [int(x) for x in config.gpu.gpu_ids.split(",")]
-        device = torch.device(f"cuda:{gpu_list[0]}")
-        print(f"Using GPUs: {gpu_list}")
-    else:
-        device = torch.device("cpu")
+    device = get_device(config.gpu.gpu_ids)
 
-    logging.info("Using device:", device)
-    torch.backends.cudnn.benchmark = True  # A bool that, if True, causes cuDNN to benchmark multiple convolution algorithms and select the fastest.
+    logging.info(f"Using device: {device}")
+    # torch.backends.cudnn.benchmark = True  # A bool that, if True, causes cuDNN to benchmark multiple convolution algorithms and select the fastest.
 
+    excluded_ids = [
+        "TCGA-05-4395",
+        "TCGA-86-8281",
+    ]  # contains anomalous time to event and censoring data
     if config.data.create_new_data_mapping:
-        # create data mappings
-        # read the file containing gene expression and tile image locations for the TCGA-LUAD samples (mapped_data_16March)
-        # mapping_df = pd.read_csv(opt.input_path + "mapped_data_21March.csv")
 
-        # mapping_df = pd.read_json(opt.input_path + "mapped_data_8may.json", orient='index') # file generated by create_image_molecular_mapping.py
-        mapping_df = pd.read_json(
-            config.data.input_path + "mapped_data_23july.json", orient="index"
+        mapping_df = create_mapping_df(
+            input_json=config.data.input_base_mapping_data_json_path,
+            n_tiles=config.data.num_tiles_per_slide,
+            seed=config.training.random_state,
+            excluded_ids=excluded_ids,
         )
-        logging.info("Total number of samples: ", mapping_df.shape[0])
-        ids_with_wsi = mapping_df[mapping_df["tiles"].map(len) > 0].index.tolist()
-        rnaseq_df = pd.DataFrame(
-            mapping_df["rnaseq_data"].to_list(), index=mapping_df.index
-        ).transpose()
-        logging.warning("Are there nans in rnaseq_df: ", rnaseq_df.isna().any().any())
-        # df containing entries where both WSI and rnaseq data are available
-        mapping_df = mapping_df.loc[ids_with_wsi]
-        logging.info(
-            "Total number of samples where both rnaseq and wsi data are available: ",
-            mapping_df.shape[0],
-        )
-        # set_trace()
-        # remove rows where the number of tiles is different from the standard (to avoid length mismatch issues during batching)
-        # edit it to keep only 200 random slides among all the available ones
-        mask = mapping_df["tiles"].apply(len) == 200
-        mapping_df = mapping_df[mask]
 
-        mapping_df["time"] = mapping_df["days_to_death"].fillna(
-            mapping_df["days_to_last_followup"]
+        mapping_df.to_json(
+            os.path.join(config.data.input_base_path, "mapping_df.json"),
+            orient="index",
         )
-        mapping_df = mapping_df.dropna(subset=["time", "event_occurred"])
-        # remove that from the wsi and rnaseq combined embeddings too
-        # rnaseq_df = rnaseq_df.drop(columns=['TCGA-49-6742'])
-        # remove entries with anomalous time_to_death and 'days_to_last_followup' data
-        excluded_ids = [
-            "TCGA-05-4395",
-            "TCGA-86-8281",
-        ]  # contains anomalous time to event and censoring data
-        mapping_df = mapping_df[~mapping_df.index.isin(excluded_ids)]
-        mapping_df.to_json("mapping_df.json", orient="index")
-        rnaseq_df.to_json("rnaseq_df.json", orient="index")
+
     else:
         mapping_df = pd.read_json(
-            config.data.input_mapping_data_path + "mapping_df.json", orient="index"
+            os.path.join(config.data.input_base_path, "mapping_df.json"),
+            orient="index",
         )
-        # remove entries with anomalous time_to_death and 'days_to_last_followup' data
-        excluded_ids = [
-            "TCGA-05-4395",
-            "TCGA-86-8281",
-        ]  # contains anomalous time to event and censoring data
-        mapping_df = mapping_df[~mapping_df.index.isin(excluded_ids)]
 
     # set_trace()
 
-    mapping_df_train, temp_df = train_test_split(
-        mapping_df, test_size=0.3, random_state=40
-    )
-    mapping_df_val, mapping_df_test = train_test_split(
-        temp_df, test_size=0.5, random_state=40
-    )
+    train_df, val_df, test_df = split_mapping(mapping_df, config.training.random_state)
 
     if config.data.create_new_data_mapping_h5:
         # create h5 version of mapping_df for faster IO
         create_h5_file(
-            "joint_fusion/mapping_data.h5",
-            mapping_df_train,
-            mapping_df_val,
-            mapping_df_test,
+            os.path.join(config.data.input_base_path, "mapping_data.h5"),
+            train_df,
+            val_df,
+            test_df,
             config.data.input_wsi_path,
         )
 
@@ -191,9 +279,9 @@ def main():
             logging.info(f"Saved profile at {trace_path}")
 
         else:
-            model, optimizer = train_nn(config, config.data.h5_file, device)
+            # model, optimizer = train_nn(config, config.data.h5_file, device)
             # used to observe test set to see if training is stable
-            # model, optimizer = train_observ_test(config, config.data.h5_file, device)
+            model, optimizer = train_observ_test(config, config.data.h5_file, device)
 
 
 if __name__ == "__main__":
