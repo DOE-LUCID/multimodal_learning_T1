@@ -54,7 +54,7 @@ def evaluate_test_set(model, test_loader, device, config, excluded_ids=None):
             print("Days to event: ", days_to_event)
             print("event occurred: ", event_occurred)
 
-            outputs, _, _ = test_model(config, tcga_id, x_wsi=x_wsi, x_omic=x_omic)
+            outputs, _, _, _ = test_model(config, tcga_id, x_wsi=x_wsi, x_omic=x_omic)
 
             # Collect results consistently
             test_predictions.append(outputs.squeeze().detach().cpu().numpy())

@@ -30,6 +30,9 @@ training:
   use_mixed_precision: true
   plot_survival_distributions: true
   contrast_loss_weight: 0.0
+  contrast_wsi_weight: 0.4
+  contrast_omic_weight: 0.4
+  contrast_joint_weight: 0.2
   sim_loss_weight: 1.0
   random_state: 40
 

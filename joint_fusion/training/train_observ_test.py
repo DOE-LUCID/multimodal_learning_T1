@@ -231,6 +231,9 @@ def train_observ_test(config, h5_file, device):
         joint_loss = JointLoss(
             sim_weight=config.training.sim_loss_weight,
             contrast_weight=config.training.contrast_loss_weight,
+            contrast_wsi_weight=config.training.contrast_wsi_weight,
+            contrast_omic_weight=config.training.contrast_omic_weight,
+            contrast_joint_weight=config.training.contrast_joint_weight,
         )
 
         # Initialize and fit the scaler for this fold
@@ -309,7 +312,12 @@ def train_observ_test(config, h5_file, device):
 
                 if config.training.use_mixed_precision:
                     with autocast():  # should wrap only the forward pass including the loss calculation
-                        predictions, wsi_embedding, omic_embedding = model(
+                        (
+                            predictions,
+                            wsi_embedding,
+                            omic_embedding,
+                            combined_embedding,
+                        ) = model(
                             config,
                             tcga_id,
                             x_wsi=x_wsi,
@@ -325,6 +333,7 @@ def train_observ_test(config, h5_file, device):
                             event_occurred,
                             wsi_embedding,
                             omic_embedding,
+                            combined_embedding,
                         )
                         print("\n loss (train, mixed precision): ", loss.data.item())
                         loss_epoch += loss.data.item()
@@ -346,11 +355,13 @@ def train_observ_test(config, h5_file, device):
 
                     start_time = time.time()
 
-                    predictions, wsi_embedding, omic_embedding = model(
-                        config,
-                        tcga_id,
-                        x_wsi=x_wsi,  # list of tensors (one for each tile)
-                        x_omic=x_omic,
+                    predictions, wsi_embedding, omic_embedding, combined_embedding = (
+                        model(
+                            config,
+                            tcga_id,
+                            x_wsi=x_wsi,  # list of tensors (one for each tile)
+                            x_omic=x_omic,
+                        )
                     )
 
                     predictions = predictions.view(-1)
@@ -363,6 +374,7 @@ def train_observ_test(config, h5_file, device):
                         event_occurred,
                         wsi_embedding,
                         omic_embedding,
+                        combined_embedding,
                     )  # Cox partial likelihood loss for survival outcome prediction
                     print("\n loss (train): ", loss.data.item())
                     step2_time = time.time()
@@ -463,11 +475,21 @@ def train_observ_test(config, h5_file, device):
                         if batch_size < torch.cuda.device_count() and isinstance(
                             model, nn.DataParallel
                         ):
-                            outputs, wsi_embedding, omic_embedding = model.module(
+                            (
+                                outputs,
+                                wsi_embedding,
+                                omic_embedding,
+                                combined_embedding,
+                            ) = model.module(
                                 config, tcga_id, x_wsi=x_wsi, x_omic=x_omic
                             )
                         else:
-                            outputs, wsi_embedding, omic_embedding = model(
+                            (
+                                outputs,
+                                wsi_embedding,
+                                omic_embedding,
+                                combined_embedding,
+                            ) = model(
                                 config,
                                 tcga_id,
                                 x_wsi=x_wsi,  # list of tensors (one for each tile)
@@ -482,6 +504,7 @@ def train_observ_test(config, h5_file, device):
                             event_occurred,
                             wsi_embedding,
                             omic_embedding,
+                            combined_embedding,
                         )  # Cox partial likelihood loss for survival outcome prediction
                         logging.info(
                             f"\n loss (validation): {loss.data.item()}",

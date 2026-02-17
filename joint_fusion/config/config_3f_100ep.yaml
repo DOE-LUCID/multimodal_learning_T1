@@ -29,16 +29,19 @@ training:
   n_folds: 3
   use_mixed_precision: true
   plot_survival_distributions: true
-  contrast_loss_weight: 0.0
+  contrast_loss_weight: 0.05
+  contrast_wsi_weight: 0.4
+  contrast_omic_weight: 0.4
+  contrast_joint_weight: 0.2
   sim_loss_weight: 1.0
   random_state: 40
 
 testing: # add this after training.
-  output_base_dir: "checkpoints/checkpoint_2026-01-08-15-39-55/test_results"
+  output_base_dir: "checkpoints/checkpoint_2026-02-14-05-44-19/test_results"
   test_batch_size: 1
-  model_path: "checkpoints/checkpoint_2026-01-08-15-39-55/checkpoint_fold_0_epoch_14.pth"
-  calc_saliency_maps: true
-  calc_IG: false
+  model_path: "checkpoints/checkpoint_2026-02-14-05-44-19/checkpoint_fold_1_epoch_39.pth"
+  calc_saliency_maps: false
+  calc_IG: true
 
 gpu:
   gpu_ids: "0,1,2,3"

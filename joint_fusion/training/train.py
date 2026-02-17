@@ -298,7 +298,12 @@ def train_nn(config, h5_file, device):
 
                 if config.training.use_mixed_precision:
                     with autocast():  # should wrap only the forward pass including the loss calculation
-                        predictions, wsi_embedding, omic_embedding = model(
+                        (
+                            predictions,
+                            wsi_embedding,
+                            omic_embedding,
+                            combined_embedding,
+                        ) = model(
                             config,
                             tcga_id,
                             x_wsi=x_wsi,
@@ -314,6 +319,7 @@ def train_nn(config, h5_file, device):
                             event_occurred,
                             wsi_embedding,
                             omic_embedding,
+                            combined_embedding,
                         )
                         print("\n loss (train, mixed precision): ", loss.data.item())
                         loss_epoch += loss.data.item()
@@ -334,11 +340,13 @@ def train_nn(config, h5_file, device):
 
                     start_time = time.time()
 
-                    predictions, wsi_embedding, omic_embedding = model(
-                        config,
-                        tcga_id,
-                        x_wsi=x_wsi,  # list of tensors (one for each tile)
-                        x_omic=x_omic,
+                    predictions, wsi_embedding, omic_embedding, combined_embedding = (
+                        model(
+                            config,
+                            tcga_id,
+                            x_wsi=x_wsi,  # list of tensors (one for each tile)
+                            x_omic=x_omic,
+                        )
                     )
 
                     predictions = predictions.view(-1)
@@ -351,6 +359,7 @@ def train_nn(config, h5_file, device):
                         event_occurred,
                         wsi_embedding,
                         omic_embedding,
+                        combined_embedding,
                     )  # Cox partial likelihood loss for survival outcome prediction
                     print("\n loss (train): ", loss.data.item())
                     step2_time = time.time()

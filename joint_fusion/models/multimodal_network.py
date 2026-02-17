@@ -177,7 +177,7 @@ class MultimodalNetwork(nn.Module):
             f"(In MultimodalNetwork) Step 1: {step1_time - start_time:.4f}s, Step 2: {step2_time - step1_time:.4f}s, Step 3: {step3_time - step2_time:.4f}s"
         )
 
-        return output, raw_wsi_embedding, raw_omic_embedding
+        return output, raw_wsi_embedding, raw_omic_embedding, combined_embedding
 
     def forward_omic_only(self, x_omic):
         omic_embedding = self.omic_net(x_omic)
