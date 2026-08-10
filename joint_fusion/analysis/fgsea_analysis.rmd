@@ -146,3 +146,70 @@ for (tg in names(res_by)) {
   print(p_dot)
 }
 ```
+
+```{r enrichment-curves, fig.width=7.5, fig.height=6.2, out.width="100%"}
+# GSEApy-style overlay: running ES for several sets in one panel, the ranked
+# metric shaded on a right-hand axis, one colour-matched hit-tick row per set.
+
+tg   = "H"
+top5 = head(res_by[[tg]]$res[order(-NES)], 5)
+sel  = data.frame(tag = tg, abbr = "H", pathway = top5$pathway,
+                  NES = top5$NES, padj = top5$padj, stringsAsFactors = FALSE)
+sel$label = sprintf("%s::%s  (NES %+.2f, q %.2g)", sel$abbr,
+  gsub("_", " ", sub("^HALLMARK_", "", sel$pathway)), sel$NES, sel$padj)
+
+pal = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")[seq_len(nrow(sel))]
+names(pal) = sel$label
+
+
+pdat = lapply(seq_len(nrow(sel)), function(i)
+  plotEnrichmentData(res_by[[sel$tag[i]]]$pathways[[sel$pathway[i]]], ranks))
+
+curves = rbindlist(lapply(seq_along(pdat), function(i)
+  data.table(pdat[[i]]$curve, label = sel$label[i])))
+curves[, label := factor(label, levels = sel$label)]   # legend order == tick-row order
+stats_dt = pdat[[1]]$stats
+n = max(curves$rank)          # curve runs to nrow(stats)+1; clipping at nrow drops the tail
+
+k = max(abs(range(curves$ES))) / max(abs(stats_dt$stat))   # metric -> ES scale
+stats_dt[, scaled := stat * k]
+xsc = scale_x_continuous(limits = c(0, n), expand = expansion(mult = c(0.01, 0.01)))
+
+p_main = ggplot() +
+  geom_area(data = stats_dt, aes(rank, scaled), fill = "grey85", colour = NA) +
+  geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.3) +
+  geom_line(data = curves, aes(rank, ES, colour = label), linewidth = 0.6) +
+  scale_colour_manual(values = pal, name = NULL) +
+  scale_y_continuous(name = "Enrichment Score",
+                     sec.axis = sec_axis(~ . / k, name = "Ranked metric")) +
+  xsc +
+  theme_bw(base_size = 9) +
+  theme(legend.position = "top", legend.direction = "vertical",
+        legend.key.height = unit(9, "pt"), legend.text = element_text(size = 6.5),
+        legend.margin = margin(0, 0, 0, 0),
+        axis.title.x = element_blank(), axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y.right = element_text(colour = "grey40"),
+        axis.text.y.right  = element_text(colour = "grey40"),
+        panel.grid.minor = element_blank())
+
+tick_panel = function(i, last = FALSE) {
+  g = ggplot(pdat[[i]]$ticks) +
+    geom_segment(aes(x = rank, xend = rank, y = 0, yend = 1),
+                 colour = pal[i], linewidth = 0.25) +
+    xsc + scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+    theme_bw(base_size = 9) +
+    theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(), panel.grid = element_blank())
+  if (last) g + labs(x = "Gene Rank")
+  else g + theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+                 axis.ticks.x = element_blank())
+}
+ticks = lapply(seq_len(nrow(sel)), function(i) tick_panel(i, last = (i == nrow(sel))))
+
+p_curves = cowplot::plot_grid(plotlist = c(list(p_main), ticks), ncol = 1,
+  align = "v", axis = "lr", rel_heights = c(1, rep(0.13, nrow(sel) - 1), 0.20))
+ggsave(file.path(params$out_path, "top5_h_gsea_enrichment_curves.png"),
+       p_curves, width = 7.5, height = 6.2, dpi = 300)
+p_curves
+```
