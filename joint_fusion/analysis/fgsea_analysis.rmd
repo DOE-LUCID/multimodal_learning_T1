@@ -53,7 +53,6 @@ ranks = df$mean_path_gradient
 names(ranks) = df$ensembl_id
 ranks = sort(ranks, decreasing = TRUE)
 
-# no dup names
 stopifnot(!any(duplicated(names(ranks))), !any(is.na(ranks)))
 cat(sprintf("%d genes; range [%.4g, %.4g]\n", length(ranks), min(ranks), max(ranks)))
 head(ranks); tail(ranks)
@@ -133,15 +132,25 @@ for (tg in names(res_by)) {
   dot_df = unique(rbind(head(sig[order(-NES)], 20), head(sig[order(NES)], 20)), by = "pathway")
   dot_df[, pathway_short := substr(sub("\\s*R-HSA-\\d+\\s*$", "", pathway), 1, 55)]
   dot_df[, pathway := factor(pathway_short, levels = pathway_short[order(NES)])]
+  dot_df[, padj_plot := pmax(padj, 1e-6)]
   p_dot = ggplot(dot_df, aes(x = NES, y = pathway)) +
-    geom_point(aes(color = padj, size = size), shape = 16) +
+    geom_point(aes(color = padj_plot, size = size), shape = 16) +
     scale_color_gradient(low = "#B2182B", high = "#2166AC", name = "FDR q-value", limits = c(0, 0.25)) +
-    scale_size_continuous(name = "Gene set size", range = c(2, 8)) +
+    scale_color_gradient(
+  low = "#B2182B",
+  high = "#2166AC",
+  name = "FDR q-value",
+  trans = "log10",
+  limits = c(1e-6, 0.25),
+  breaks = c(1e-6, 1e-4, 1e-3, 1e-2, 0.05, 0.25),
+  labels = c("<1e-6", "1e-4", "1e-3", "0.01", "0.05", "0.25")
+)  +
     geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
     labs(title = tg, x = "Normalized Enrichment Score (NES)", y = NULL) +
     theme_bw(base_size = 10) +
     theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-          axis.text.y = element_text(size = 7), panel.grid.minor = element_blank())
+          axis.text.y = element_text(size = 7), panel.grid.minor = element_blank(),
+          legend.title = element_text(margin = margin(b = 6)))
   ggsave(file.path(params$out_path, paste0(tg, "_gsea_dotplot.png")), p_dot, width = 9, height = 10, dpi = 200)
   print(p_dot)
 }
@@ -212,4 +221,26 @@ p_curves = cowplot::plot_grid(plotlist = c(list(p_main), ticks), ncol = 1,
 ggsave(file.path(params$out_path, "top5_h_gsea_enrichment_curves.png"),
        p_curves, width = 7.5, height = 6.2, dpi = 300)
 p_curves
+```
+
+## Coverage statistics
+```{r coverage, results='asis'}
+cov = rbindlist(lapply(names(res_by), function(tg) {
+  p   = res_by[[tg]]$pathways
+  G   = names(ranks)
+  uni = unique(unlist(p, use.names = FALSE))
+  ov  = vapply(p, function(s) length(intersect(s, G)), integer(1))
+  keep = ov >= params$min_size & ov <= params$max_size
+  data.table(
+    collection    = tg,
+    sets          = length(p),
+    tested        = sum(keep),
+    coll_genes    = length(uni),
+    measured      = length(intersect(G, uni)),
+    pct_of_ranked = round(100 * length(intersect(G, uni)) / length(G), 1),
+    in_tested     = length(intersect(G, unique(unlist(p[keep], use.names = FALSE)))),
+    pct_tested    = round(100 * length(intersect(G, unique(unlist(p[keep], use.names = FALSE)))) / length(G), 1)
+  )
+}))
+print(kableExtra::kable_styling(knitr::kable(cov, booktabs = TRUE), font_size = 8))
 ```
