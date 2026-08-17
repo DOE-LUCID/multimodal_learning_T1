@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from joint_fusion.testing.pathway_tests import DEFAULT_CONFIG
+DEFAULT_CONFIG = "joint_fusion/config/config_checkpoint_2026-04-07-04-58-17_fold1.yaml"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -66,7 +66,8 @@ def export_ranked_genes(all_genes_csv, out_path):
 
     ranked["ensembl_id"] = strip_ensembl_version(ranked["ensembl_id"])
 
-    # version stripping can rarely collapse two versioned IDs onto one base ID; average them so the ranks vector fgsea receives has unique names.
+    # Version stripping can collapse two IDs onto one base ID; average them so the
+    # ranks vector fgsea receives has unique names.
     n_before = len(ranked)
     ranked = ranked.groupby("ensembl_id", as_index=False)[RANK_COLUMN].mean()
     if len(ranked) < n_before:

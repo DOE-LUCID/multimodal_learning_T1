@@ -1,54 +1,6 @@
 """
 interpret_omics.py
 
-Gene-level view of the omic integrated gradients: rank the genes the model leans on,
-annotate them from their Ensembl IDs, and report each gene's direction of effect.
-
-This is the SUPPORTING layer. The headline analysis is pathway-level and lives in
-pathway_interpret.py, which follows Steyaert et al. (2023) by aggregating the same
-attributions over MSigDB gene sets and testing them. Read this table as "which
-individual genes carry the attribution", not as a biological claim on its own --
-a ranked gene list has no p-value attached to it.
-
-Two rankings, and they mean different things:
-
-  MAGNITUDE (mean |IG|)
-      How much attribution a gene carries, regardless of direction. This is the
-      honest importance ranking, and it is also what the paper ranks by (sum of
-      absolute attribution across samples).
-
-  DIRECTION (mean path gradient)
-      Whether raising a gene's expression pushes the predicted risk UP (positive,
-      poor prognosis) or DOWN (negative, protective).
-
-What is NOT used here, and why: the cohort-mean SIGNED IG. This model's IG is taken
-against a baseline of mean training expression, so IG carries a factor of
-(x - cohort_mean) whose sign flips depending on whether a given patient is above or
-below the cohort average. Averaged across the cohort, that sign cancels -- on this
-checkpoint the median gene keeps only ~10% of its magnitude in the signed mean, and
-only 5 of the top-20 magnitude genes survive into the top-20 signed list. Ranking by
-signed IG therefore sorts genes by how skewed their expression is, not by how they
-move risk. The earlier version of this script did exactly that; the direction now
-comes from the gradient instead. Full derivation:
-literature/ig_pathway_design_notes.md.
-
-Also removed deliberately: the hand-curated LUAD_DRIVER_GENES list and the
-LUAD_TERM_KEYWORDS substring matcher. Flagging a pathway as "LUAD-related" because
-its NAME contains "kras" or "cell cycle" is circular -- it confirms whatever the list
-was written to confirm, and it is not evidence. LUAD relevance is now something
-pathway_interpret.py tests (permutation FDR, GSEA, hypergeometric ORA against the
-measured-gene background) rather than something asserted here.
-
-Outputs (under <output_base_dir>/interpret_omics/):
-  all_gene_ig_scores.csv  one row per measured gene (all ~9k), IG magnitude plus path
-                          and vanilla gradient direction summaries, keyed by Ensembl ID
-  top_genes.csv           one row per top gene, with IG magnitude plus path and
-                          vanilla gradient direction summaries
-  top_genes.json          same content, nested
-  patient_top_genes.csv   patient-level signed IG rows for the top |IG| genes per
-                          patient; this is where signed IG should be read
-  top_genes_gene_info.csv full gget.info specification rows for the top genes
-  missing_genes.txt       Ensembl IDs the annotation cache could not resolve
 
 Run from the repo root:
   python -m joint_fusion.testing.interpret_omics --config=<config.yaml> --top-n=20
@@ -73,13 +25,6 @@ logger = logging.getLogger(__name__)
 
 @functools.lru_cache(maxsize=1)
 def _get_gget():
-    """Import gget lazily so the script still runs where gget is unavailable.
-
-    Returns the gget module, or None if it cannot be imported (e.g. an offline
-    compute node). Warns exactly once. When None, annotation is served purely
-    from the on-disk cache and any cache miss is recorded in missing_genes.txt
-    (fetch those locally with get_gene_info.py and copy the CSVs into the cache).
-    """
     try:
         import gget
 
@@ -92,8 +37,7 @@ def _get_gget():
         return None
 
 
-# On-disk per-gene info cache: one <clean_ensembl_id>.csv per gene, the same
-# layout get_gene_info.py writes to assets/gene_info.
+# One <clean_ensembl_id>.csv per gene, same layout get_gene_info.py writes.
 GENE_INFO_CACHE_DIR = "assets/gene_info"
 
 
@@ -135,10 +79,7 @@ def load_gene_names(mapping_file_path):
 
 
 def load_ig_matrix(ig_directory, n_genes, prefix="integrated_grads"):
-    """Load every <prefix>_<TCGA>.npy file into a (patients x genes) matrix.
-
-    Returns:
-    """
+    """Load every <prefix>_<TCGA>.npy file into a (patients x genes) matrix."""
     files = sorted(glob.glob(os.path.join(ig_directory, f"{prefix}_*.npy")))
     if not files:
         return None, []
@@ -158,7 +99,9 @@ def load_ig_matrix(ig_directory, n_genes, prefix="integrated_grads"):
         patient_ids.append(tcga_id)
 
     if not rows:
-        raise ValueError(f"No {prefix} file matched the expected gene count ({n_genes}).")
+        raise ValueError(
+            f"No {prefix} file matched the expected gene count ({n_genes})."
+        )
 
     logger.info(f"Loaded {prefix} for {len(patient_ids)} patients x {n_genes} genes")
     return np.vstack(rows), patient_ids
@@ -226,9 +169,7 @@ def compute_gene_stats(
     path_gradient_matrix=None,
     vanilla_gradient_matrix=None,
 ):
-    """Per-gene attribution statistics across patients.
-
-    """
+    """Per-gene attribution statistics across patients."""
     abs_matrix = np.abs(ig_matrix)
     mean_ig = ig_matrix.mean(axis=0)
     mean_abs_ig = abs_matrix.mean(axis=0)
@@ -260,9 +201,9 @@ def compute_gene_stats(
     if vanilla_gradient_matrix is not None:
         stats["mean_vanilla_gradient"] = vanilla_gradient_matrix.mean(axis=0)
         stats["std_vanilla_gradient"] = vanilla_gradient_matrix.std(axis=0)
-        stats["frac_vanilla_gradient_positive"] = (
-            vanilla_gradient_matrix > 0
-        ).mean(axis=0)
+        stats["frac_vanilla_gradient_positive"] = (vanilla_gradient_matrix > 0).mean(
+            axis=0
+        )
     else:
         stats["mean_vanilla_gradient"] = np.nan
         stats["std_vanilla_gradient"] = np.nan
@@ -370,13 +311,10 @@ def _extract_field(row, candidate_cols):
 
 
 def load_or_fetch_gene_csv(ensembl_id, cache_dir=GENE_INFO_CACHE_DIR):
-    """Return the full gene-info row (as a 1-row DataFrame) for one gene.
+    """Return the full gene-info row (as a 1-row DataFrame) for one gene, or None.
 
-    Checks ``cache_dir/<clean_id>.csv`` first; on a miss, fetches the gene with
-    ``gget.info`` and writes ``<clean_id>.csv`` exactly like get_gene_info.py
-    (raw gget.info frame, ``index=False``) so both share one cache format.
-    Returns None if the gene cannot be resolved (cache miss with gget
-    unavailable, a failed fetch, or an empty result).
+    Reads ``cache_dir/<clean_id>.csv``; on a miss, fetches via ``gget.info`` and
+    writes it back in get_gene_info.py's format so both share one cache.
     """
     clean = clean_ensembl_id(ensembl_id)
     fp = os.path.join(cache_dir, f"{clean}.csv")
@@ -424,17 +362,10 @@ def _row_to_details(row):
 def annotate_genes(ensembl_ids, cache_dir=GENE_INFO_CACHE_DIR):
     """Resolve full specifications for each gene from the on-disk cache.
 
-    For every Ensembl ID: read ``cache_dir/<clean_id>.csv`` if present, otherwise
-    request it via gget.info and save it back (same per-gene CSV format as
-    get_gene_info.py).
-
-    Returns:
-        (details, full_info_df, missing_ids) where ``details`` maps each original
-        ensembl_id to {symbol, description, biotype}, ``full_info_df`` concatenates
-        the complete gget.info specification rows for the resolved genes, and
-        ``missing_ids`` is the list of clean Ensembl IDs that could not be resolved
-        (cache miss without gget, or a failed/empty fetch) -- fetch these locally
-        with get_gene_info.py and copy their CSVs into ``cache_dir``.
+    Returns (details, full_info_df, missing_ids): ``details`` maps ensembl_id to
+    {symbol, description, biotype}, ``full_info_df`` concatenates the resolved
+    gget.info rows, and ``missing_ids`` lists the unresolved IDs -- fetch those
+    locally with get_gene_info.py and copy their CSVs into ``cache_dir``.
     """
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -518,9 +449,8 @@ def build_table(ranking_frames, details):
                     "cohort_path_vanilla_direction_agree": optional_bool(
                         r.get("cohort_path_vanilla_direction_agree", np.nan)
                     ),
-                    # Kept for transparency only. Its sign is patient-relative under a
-                    # cohort-mean baseline and must not be read as a risk direction;
-                    # signed_retention shows how little of the attribution it preserves.
+                    # Transparency only: the sign is patient-relative under a
+                    # cohort-mean baseline, so it is not a risk direction.
                     "mean_signed_ig": round(float(r["mean_ig"]), 6),
                     "signed_retention": round(float(r["signed_retention"]), 4),
                     "frac_ig_positive": round(float(r["frac_positive"]), 4),
@@ -542,9 +472,8 @@ def build_patient_top_table(
 ):
     """Top per-patient signed IG rows.
 
-    This is the correct place to read signed IG: each row says whether that patient's
-    expression of a gene, relative to the baseline, pushed predicted risk up or down.
-    Cohort-level gene direction still comes from gradients, not signed IG.
+    The only place signed IG is a valid direction: each row is one patient's
+    expression relative to baseline. Cohort direction still comes from gradients.
     """
     if top_n is None or top_n <= 0:
         return None
@@ -612,11 +541,15 @@ def build_patient_top_table(
 def load_baseline(ig_directory, n_genes):
     path = os.path.join(ig_directory, "ig_baseline.npy")
     if not os.path.exists(path):
-        logger.warning("No ig_baseline.npy found; patient_top_genes.csv will omit baseline.")
+        logger.warning(
+            "No ig_baseline.npy found; patient_top_genes.csv will omit baseline."
+        )
         return None
     baseline = np.asarray(np.load(path)).flatten()
     if len(baseline) != n_genes:
-        logger.warning(f"Skipping ig_baseline.npy: {len(baseline)} values != {n_genes} genes")
+        logger.warning(
+            f"Skipping ig_baseline.npy: {len(baseline)} values != {n_genes} genes"
+        )
         return None
     return baseline
 
@@ -760,7 +693,9 @@ def run(
         "vanilla_gradients", vanilla_gradient_matrix, vanilla_gradient_ids, patient_ids
     )
 
-    omic_matrix, omic_ids = load_ig_matrix(ig_directory, len(gene_names), prefix="omic_input")
+    omic_matrix, omic_ids = load_ig_matrix(
+        ig_directory, len(gene_names), prefix="omic_input"
+    )
     omic_matrix = validate_optional_patient_matrix(
         "omic_input", omic_matrix, omic_ids, patient_ids
     )
@@ -788,8 +723,6 @@ def run(
     )
     logger.info(f"Primary direction source: {direction_source}")
 
-    # Full per-gene attribution table (every measured gene, not just the top ranks): IG
-    # magnitude + path/vanilla gradient direction columns keyed by Ensembl ID.
     all_genes_path = os.path.join(output_dir, "all_gene_ig_scores.csv")
     stats.sort_values("mean_abs_ig", ascending=False, ignore_index=True).to_csv(
         all_genes_path, index=False
@@ -801,7 +734,9 @@ def run(
     ensembl_ids = list(
         dict.fromkeys(eid for frame in ranking_frames for eid in frame["ensembl_id"])
     )
-    details, full_info_df, missing_ids = annotate_genes(ensembl_ids, gene_info_cache_dir)
+    details, full_info_df, missing_ids = annotate_genes(
+        ensembl_ids, gene_info_cache_dir
+    )
     write_missing_genes(missing_ids, output_dir)
 
     table = build_table(ranking_frames, details)
@@ -832,8 +767,9 @@ def main(config, opt):
     )
     logger.info(
         "\nDone. See all_gene_ig_scores.csv (every gene), top_genes.csv and "
-        "patient_top_genes.csv. For the pathway-level "
-        "analysis and the statistical evidence, run joint_fusion.testing.pathway_interpret."
+        "patient_top_genes.csv. For the pathway-level analysis, run "
+        "joint_fusion.testing.export_gsea_ranked_genes, then knit "
+        "joint_fusion/analysis/fgsea_analysis.rmd."
     )
 
 
@@ -881,8 +817,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    # Lazy import so importing this module as a library does not require the training-config
-    # stack (pydantic); only the CLI entry point needs ConfigManager.
+    # Lazy import so using this module as a library does not pull in pydantic.
     from joint_fusion.config.config_manager import ConfigManager
 
     opt = parse_args()
