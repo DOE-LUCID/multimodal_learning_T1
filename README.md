@@ -110,7 +110,7 @@ calculation of explainability metrics.  -->
 
 A schematic of the multimodal framework is shown below:
 
-![multimodal_framework](images/mm_schematic.new3.PNG)
+![multimodal_framework](images/multimodal_schematic.updated.v2.png)
 
 
 **Loss function and model training**
@@ -252,7 +252,7 @@ python trainer.py --input_path --input_wsi_path --batch_size --lr --lr_decay_ite
 
 ### Bootstrapped Concordance Indices
 <!-- ![multimodal_framework](images/cindex_comparison_modalities.png) -->
-<img src="images/cindex_comparison_modalities.updated.png" alt="multimodal framework" width="400">
+<img src="images/cindex_comparison_modalities.updated.v2.png" alt="multimodal framework" width="400">
 
 
 ### Time dependent AUC
