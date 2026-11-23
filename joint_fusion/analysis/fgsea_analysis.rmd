@@ -1,0 +1,246 @@
+---
+title: "fgsea: model path-gradient enrichment"
+author: "John Wu"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+       toc: true
+       toc_float: true
+       code_folding: show
+    pdf_document:
+       toc: true
+geometry: margin=1in
+header-includes:
+    - \usepackage{fvextra}
+    - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+    - \DefineVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere}
+---
+
+```{r setup, include=FALSE}
+
+  params <- list(
+    ranked_csv    = "checkpoint_2026-04-07-04-58-17/best_model_fold_1/gsea_ranked_genes.csv",
+    species       = "Homo sapiens",
+    collections   = list(
+      list(collection = "C2", subcollection = "CP:KEGG_MEDICUS"),
+      list(collection = "H",  subcollection = NULL),
+      list(collection = "C6", subcollection = NULL)
+    ),
+    min_size      = 15,
+    max_size      = 500,
+    seed          = 42,
+    out_path      = "./results",
+    out_results   = "fgsea_results.csv",
+    plot_top_n    = 5
+  )
+
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE, fig.width = 6, fig.height = 4)
+library(fgsea)
+library(msigdbr)
+library(ggplot2)
+library(data.table)
+library(BiocParallel)
+
+register(SerialParam())
+```
+
+```{r ranks}
+
+df = read.csv(params$ranked_csv, stringsAsFactors = FALSE)
+stopifnot(all(c("ensembl_id", "mean_path_gradient") %in% names(df)))
+ranks = df$mean_path_gradient
+names(ranks) = df$ensembl_id
+ranks = sort(ranks, decreasing = TRUE)
+
+stopifnot(!any(duplicated(names(ranks))), !any(is.na(ranks)))
+cat(sprintf("%d genes; range [%.4g, %.4g]\n", length(ranks), min(ranks), max(ranks)))
+head(ranks); tail(ranks)
+```
+
+```{r run}
+tag_of = function(cl, sub) if (is.null(sub)) cl else paste0(cl, "_", gsub("[^A-Za-z0-9]+", "_", sub))
+dir.create(params$out_path, showWarnings = FALSE, recursive = TRUE)
+
+res_by = list()
+for (spec in params$collections) {
+  tg = tag_of(spec$collection, spec$subcollection)
+  cache_file = sprintf("pathways_%s.rds", tg)
+  if (file.exists(cache_file)) {
+    pathways = readRDS(cache_file)
+  } else {
+    m = msigdbr(species = params$species, collection = spec$collection, subcollection = spec$subcollection)
+    pathways = split(m$ensembl_gene, m$gs_name)
+    saveRDS(pathways, cache_file)
+  }
+
+  set.seed(params$seed)
+  res = fgsea(pathways = pathways, stats = ranks, minSize = params$min_size, maxSize = params$max_size, eps = 0)
+  res = res[order(res$padj, res$pval)]
+
+  out = data.frame(res)
+  out$leadingEdge = vapply(out$leadingEdge, paste, character(1), collapse = ";")
+  write.csv(out, file.path(params$out_path, paste0(tg, "_", params$out_results)), row.names = FALSE)
+
+  res_by[[tg]] = list(res = res, pathways = pathways)
+}
+```
+
+## Results
+
+```{r tables, results='asis'}
+for (tg in names(res_by)) {
+  cat("\n\n###", tg, "\n\n")
+  # Ordered by NES, keeping both tails: the 10 most positive and 10 most negative.
+  # A plain head(order(-NES), 20) would drop the risk-decreasing side entirely.
+  by_nes = res_by[[tg]]$res[order(-NES)]
+  n = nrow(by_nes)
+  sel = if (n <= 20) seq_len(n) else c(1:10, (n - 9):n)
+  tab = by_nes[sel, c("pathway","NES","pval","padj","size")]
+  tab$pathway = gsub("_", " ", substr(tab$pathway, 1, 60))
+  k = knitr::kable(tab, digits = 4, booktabs = TRUE, longtable = TRUE)
+  k = kableExtra::kable_styling(k, latex_options = c("hold_position", "repeat_header"), font_size = 8)
+  k = kableExtra::column_spec(k, 1, width = "8cm")
+  print(k)
+}
+```
+
+## Enrichment plots
+
+```{r enrichment-plots, fig.width=6, fig.height=4, out.width="100%", fig.show="asis"}
+for (tg in names(res_by)) {
+  res = res_by[[tg]]$res
+  pathways = res_by[[tg]]$pathways
+  for (term in head(res$pathway, params$plot_top_n)) {
+    print(
+      plotEnrichment(pathways[[term]], ranks) +
+        labs(title = term,
+             subtitle = sprintf("%s | NES = %.2f,  padj = %.2g", tg,
+                                res$NES[res$pathway == term], res$padj[res$pathway == term]))
+    )
+  }
+}
+```
+
+## Dotplot
+
+```{r dotplot, fig.width=7, fig.height=9, out.width="100%"}
+for (tg in names(res_by)) {
+  res = res_by[[tg]]$res
+  sig = res[padj < 0.25]
+  if (nrow(sig) == 0) next
+  dot_df = unique(rbind(head(sig[order(-NES)], 20), head(sig[order(NES)], 20)), by = "pathway")
+  dot_df[, pathway_short := substr(sub("\\s*R-HSA-\\d+\\s*$", "", pathway), 1, 55)]
+  dot_df[, pathway := factor(pathway_short, levels = pathway_short[order(NES)])]
+  dot_df[, padj_plot := pmax(padj, 1e-6)]
+  p_dot = ggplot(dot_df, aes(x = NES, y = pathway)) +
+    geom_point(aes(color = padj_plot, size = size), shape = 16) +
+    scale_color_gradient(low = "#B2182B", high = "#2166AC", name = "FDR q-value", limits = c(0, 0.25)) +
+    scale_color_gradient(
+  low = "#B2182B",
+  high = "#2166AC",
+  name = "FDR q-value",
+  trans = "log10",
+  limits = c(1e-6, 0.25),
+  breaks = c(1e-6, 1e-4, 1e-3, 1e-2, 0.05, 0.25),
+  labels = c("<1e-6", "1e-4", "1e-3", "0.01", "0.05", "0.25")
+)  +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    labs(x = "Normalized Enrichment Score (NES)", y = NULL) +
+    theme_bw(base_size = 10) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          axis.text.y = element_text(size = 7), panel.grid.minor = element_blank(),
+          legend.title = element_text(margin = margin(b = 6)))
+  ggsave(file.path(params$out_path, paste0(tg, "_gsea_dotplot.png")), p_dot, width = 9, height = 10, dpi = 200)
+  print(p_dot)
+}
+```
+
+```{r enrichment-curves, fig.width=7.5, fig.height=6.2, out.width="100%"}
+# GSEApy-style overlay: running ES for several sets in one panel, the ranked
+# metric shaded on a right-hand axis, one colour-matched hit-tick row per set.
+
+tg   = "H"
+top5 = head(res_by[[tg]]$res[order(-NES)], 5)
+sel  = data.frame(tag = tg, abbr = "H", pathway = top5$pathway,
+                  NES = top5$NES, padj = top5$padj, stringsAsFactors = FALSE)
+sel$label = sprintf("%s::%s  (NES %+.2f, q %.2g)", sel$abbr,
+  gsub("_", " ", sub("^HALLMARK_", "", sel$pathway)), sel$NES, sel$padj)
+
+pal = c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")[seq_len(nrow(sel))]
+names(pal) = sel$label
+
+
+pdat = lapply(seq_len(nrow(sel)), function(i)
+  plotEnrichmentData(res_by[[sel$tag[i]]]$pathways[[sel$pathway[i]]], ranks))
+
+curves = rbindlist(lapply(seq_along(pdat), function(i)
+  data.table(pdat[[i]]$curve, label = sel$label[i])))
+curves[, label := factor(label, levels = sel$label)]   # legend order == tick-row order
+stats_dt = pdat[[1]]$stats
+n = max(curves$rank)          # curve runs to nrow(stats)+1; clipping at nrow drops the tail
+
+k = max(abs(range(curves$ES))) / max(abs(stats_dt$stat))   # metric -> ES scale
+stats_dt[, scaled := stat * k]
+xsc = scale_x_continuous(limits = c(0, n), expand = expansion(mult = c(0.01, 0.01)))
+
+p_main = ggplot() +
+  geom_area(data = stats_dt, aes(rank, scaled), fill = "grey85", colour = NA) +
+  geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.3) +
+  geom_line(data = curves, aes(rank, ES, colour = label), linewidth = 0.6) +
+  scale_colour_manual(values = pal, name = NULL) +
+  scale_y_continuous(name = "Enrichment Score",
+                     sec.axis = sec_axis(~ . / k, name = "Ranked metric")) +
+  xsc +
+  theme_bw(base_size = 9) +
+  theme(legend.position = "top", legend.direction = "vertical",
+        legend.key.height = unit(9, "pt"), legend.text = element_text(size = 6.5),
+        legend.margin = margin(0, 0, 0, 0),
+        axis.title.x = element_blank(), axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y.right = element_text(colour = "grey40"),
+        axis.text.y.right  = element_text(colour = "grey40"),
+        panel.grid.minor = element_blank())
+
+tick_panel = function(i, last = FALSE) {
+  g = ggplot(pdat[[i]]$ticks) +
+    geom_segment(aes(x = rank, xend = rank, y = 0, yend = 1),
+                 colour = pal[i], linewidth = 0.25) +
+    xsc + scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
+    theme_bw(base_size = 9) +
+    theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(), panel.grid = element_blank())
+  if (last) g + labs(x = "Gene Rank")
+  else g + theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+                 axis.ticks.x = element_blank())
+}
+ticks = lapply(seq_len(nrow(sel)), function(i) tick_panel(i, last = (i == nrow(sel))))
+
+p_curves = cowplot::plot_grid(plotlist = c(list(p_main), ticks), ncol = 1,
+  align = "v", axis = "lr", rel_heights = c(1, rep(0.13, nrow(sel) - 1), 0.20))
+ggsave(file.path(params$out_path, "top5_h_gsea_enrichment_curves.png"),
+       p_curves, width = 7.5, height = 6.2, dpi = 300)
+p_curves
+```
+
+## Coverage statistics
+```{r coverage, results='asis'}
+cov = rbindlist(lapply(names(res_by), function(tg) {
+  p   = res_by[[tg]]$pathways
+  G   = names(ranks)
+  uni = unique(unlist(p, use.names = FALSE))
+  ov  = vapply(p, function(s) length(intersect(s, G)), integer(1))
+  keep = ov >= params$min_size & ov <= params$max_size
+  data.table(
+    collection    = tg,
+    sets          = length(p),
+    tested        = sum(keep),
+    coll_genes    = length(uni),
+    measured      = length(intersect(G, uni)),
+    pct_of_ranked = round(100 * length(intersect(G, uni)) / length(G), 1),
+    in_tested     = length(intersect(G, unique(unlist(p[keep], use.names = FALSE)))),
+    pct_tested    = round(100 * length(intersect(G, unique(unlist(p[keep], use.names = FALSE)))) / length(G), 1)
+  )
+}))
+print(kableExtra::kable_styling(knitr::kable(cov, booktabs = TRUE), font_size = 8))
+```

@@ -1,0 +1,76 @@
+# Base configuration
+
+data:
+  input_base_path: "/lus/eagle/clone/g2/projects/GeomicVar/jozhw/multimodal_learning_T1/mapping_data/31jan_256px_20x/"
+  input_base_mapping_data_json_path: "/lus/eagle/clone/g2/projects/GeomicVar/jozhw/multimodal_learning_T1/mapping_data/31jan_256px_20x/mapping_df_31Jan_1000tiles.json"
+  input_wsi_path: "/lus/eagle/clone/g2/projects/GeomicVar/tarak/multimodal_learning_T1/preprocessing/TCGA_WSI/LUAD_all/svs_files/FFPE_tiles_single_sample_per_patient_20X_1000tiles/tiles/256px_128um/combined/"
+  h5_file: "mapping_data/31jan_256px_20x/mapping_data.h5"
+  json_file: "mapping_data/31jan_256px_20x/mapping_df.json"
+  only_create_new_data_mapping: false
+  create_new_data_mapping: false
+  create_new_data_mapping_h5: false
+  num_tiles_per_slide: 400
+
+model:
+  embedding_dim_wsi: 384
+  embedding_dim_omic: 256
+  mlp_layers: 4
+  dropout: 0.2
+  fusion_type: "joint"
+  joint_embedding: "weighted_avg"
+  input_mode: "wsi_omic"
+  wsi_fm: "uni"
+  pooling: "attention"
+  use_pretrained_omic: false
+  wsi_encoder_tile_batch_size: 64
+  omic_checkpoint_path: "checkpoints/checkpoint_2024-09-04-07-56-47/checkpoint_epoch_1500.pth"
+
+training:
+  batch_size: 30
+  val_batch_size: 30
+  lr: 0.0001
+  num_epochs: 100
+  n_folds: 3
+  use_mixed_precision: true
+  plot_survival_distributions: true
+  contrast_loss_weight: 0.01
+  contrast_wsi_weight: 0.4
+  contrast_omic_weight: 0.4
+  contrast_joint_weight: 0.2
+  sim_loss_weight: 1.0
+  random_state: 40
+
+testing: # add this after training.
+  output_base_dir: "checkpoints/checkpoint_2026-02-14-05-44-19/test_results"
+  test_batch_size: 1
+  model_path: "checkpoints/checkpoint_2026-02-14-05-44-19/checkpoint_fold_1_epoch_39.pth"
+  calc_saliency_maps: true
+  calc_IG: true
+  calc_attention_maps: true
+  saliency_tile_selection: "all"
+  saliency_attention_scores_dir: "checkpoints/checkpoint_2026-02-14-05-44-19/test_results/attention_scores"
+  saliency_chunked: true
+  saliency_chunk_size: 16
+  saliency_self_check: false
+
+gpu:
+  gpu_ids: "0,1,2,3"
+  use_multi_gpu: true # hard coded false with override for testing
+
+logging:
+  log_level: "INFO"
+  checkpoint_dir: null  # Will be auto-generated if null
+  profile: false
+  
+scheduler:
+  type: "cosine_warmer"  # cosine_warmer, exponential, step_lr
+  cosine_warmer:
+    T_0: 10
+    T_mult: 2
+    eta_min: 0.000001
+    decay_factor: 0.5
+  exponential: # although other types not used for reference
+    gamma: 0.95
+  step_lr:
+    step_size: 10
+    gamma: 0.95
